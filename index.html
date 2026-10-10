@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="description" content="하루의 식사를 기록하고 나에게 맞는 영양 목표를 확인하는 NutriFit. 소프트웨어공학 팀 프로젝트의 브라우저 체험판입니다.">
+  <title>NutriFit · 맞춤형 식단 매니저</title>
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="lib/core.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문 바로가기</a>
+  <header class="site-header"><div class="header-inner">
+    <a class="brand" href="./" aria-label="NutriFit 홈"><span class="brand-icon" aria-hidden="true">N<span>✓</span></span>Nutri<span>Fit</span></a>
+    <nav id="navigation" aria-label="주 메뉴"></nav>
+    <span class="demo-badge">PORTFOLIO DEMO</span>
+  </div></header>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <main id="main" tabindex="-1"></main>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message"><form method="dialog"><h2 id="confirm-title">변경 사항 확인</h2><p id="confirm-message"></p><div class="actions"><button value="cancel" autofocus>취소</button><button class="primary" value="confirm">확인</button></div></form></dialog>
+  <footer class="site-footer"><span>NutriFit · 2026 소프트웨어공학 팀 프로젝트</span><span>이 브라우저에만 저장됩니다 · 학습용 영양 계산 예시</span><a href="https://github.com/hansol000808/nutrifit" target="_blank" rel="noopener noreferrer">프로젝트 소개 ↗</a></footer>
+  <noscript><p class="container">NutriFit을 체험하려면 브라우저에서 JavaScript를 허용해 주세요.</p></noscript>
+</body>
+</html>
