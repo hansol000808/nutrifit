@@ -2,8 +2,24 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const core = require('../lib/core.js');
+const { MaintainStrategy, DietStrategy, BulkUpStrategy, CalorieCalculator } = require('../lib/target-strategies.js');
 const FIXED = new Date(2026, 9, 11, 12);
+// Outputs captured before the Strategy refactor, rather than a second copy of its formula.
+const TARGET_CASES = [
+  ['male', 24, 175, 70, 1.55, 'maintain', { calories: 2602, carb: 376, protein: 112, fat: 72 }],
+  ['male', 24, 175, 70, 1.55, 'diet', { calories: 2102, carb: 268, protein: 126, fat: 58 }],
+  ['male', 24, 175, 70, 1.55, 'bulk', { calories: 3002, carb: 460, protein: 140, fat: 67 }],
+  ['female', 30, 165, 60, 1.375, 'maintain', { calories: 1815, carb: 244, protein: 96, fat: 50 }],
+  ['female', 30, 165, 60, 1.375, 'diet', { calories: 1315, carb: 139, protein: 108, fat: 37 }],
+  ['female', 30, 165, 60, 1.375, 'bulk', { calories: 2215, carb: 323, protein: 120, fat: 49 }],
+  ['female', 100, 100, 30, 1.2, 'diet', { calories: 1200, carb: 171, protein: 54, fat: 33 }],
+  ['male', 18, 250, 300, 1.9, 'bulk', { calories: 4500, carb: 300, protein: 600, fat: 100 }],
+  ['female', 100, 100, 150, 1.2, 'diet', { calories: 1257, carb: 0, protein: 270, fat: 35 }]
+].map(([gender, age, height, weight, activity, goal, expected]) => ({ profile: { gender, age, height, weight, activity, goal }, expected }));
 function memoryStorage() {
   const data = new Map();
   return { getItem: key => data.has(key) ? data.get(key) : null, setItem: (key, value) => data.set(key, value), data };
@@ -22,12 +38,72 @@ test('local calendar date respects Korean midnight and dates shift over leap day
   assert.equal(core.shiftDate('2026-01-01', -1), '2025-12-31');
   assert.throws(() => core.shiftDate('2026-02-30', 1), code('VALIDATION'));
 });
-test('targets preserve the project formula for ordinary profiles and reject invalid input', () => {
+test('targets preserve nine pre-refactor results including both sexes and nutrition bounds', () => {
+  for (const { profile, expected } of TARGET_CASES) {
+    assert.deepEqual(core.calcTargets(profile), expected, JSON.stringify(profile));
+    const formInput = Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, String(value)]));
+    assert.deepEqual(core.calcTargets(formInput), expected, 'numeric strings from browser forms');
+  }
   const profile = core.createBlankState(FIXED).profile;
-  assert.deepEqual(core.calcTargets(profile), { calories: 2602, carb: 376, protein: 112, fat: 72 });
-  assert.equal(core.calcTargets({ ...profile, goal: 'diet' }).calories, 2102);
-  assert.equal(core.calcTargets({ ...profile, goal: 'bulk' }).calories, 3002);
   for (const weight of ['', null, NaN, Infinity, -1, 301]) assert.throws(() => core.calcTargets({ ...profile, weight }), code('VALIDATION'));
+});
+test('unsupported goals remain validation errors and do not change saved state', () => {
+  const { store, storage } = fixture(), before = storage.getItem('test');
+  for (const goal of ['', 'custom', 'toString', '__proto__', null]) {
+    assert.throws(() => core.calcTargets({ ...TARGET_CASES[0].profile, goal }), code('VALIDATION'));
+    assert.throws(() => store.updateProfile({ goal }), code('VALIDATION'));
+    assert.equal(storage.getItem('test'), before);
+  }
+});
+test('one calculator can exchange built-in and custom strategies without goal-based dispatch', () => {
+  const { goal, ...profile } = TARGET_CASES[0].profile;
+  const calculator = new CalorieCalculator(new MaintainStrategy());
+  assert.deepEqual(calculator.calculate(profile), TARGET_CASES[0].expected);
+  calculator.setStrategy(new DietStrategy());
+  assert.deepEqual(calculator.calculate(profile), TARGET_CASES[1].expected);
+  calculator.setStrategy(new BulkUpStrategy());
+  assert.deepEqual(calculator.calculate(profile), TARGET_CASES[2].expected);
+  const calls = [];
+  calculator.setStrategy({ calculate(input) { calls.push(input); return { calories: 2000, protein: 100, fatRatio: 0.18 }; } });
+  assert.deepEqual(calculator.calculate(profile), { calories: 2000, carb: 310, protein: 100, fat: 40 });
+  assert.deepEqual(calls, [{ weight: 70, tdee: 2602.0625 }]);
+});
+test('invalid strategies and policy results fail explicitly', () => {
+  const calculator = new CalorieCalculator(new MaintainStrategy());
+  for (const invalid of [null, {}, { calculate: 1 }]) {
+    assert.throws(() => new CalorieCalculator(invalid), TypeError);
+    assert.throws(() => calculator.setStrategy(invalid), TypeError);
+  }
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), TARGET_CASES[0].expected);
+  for (const result of [null, {}, { calories: Infinity, protein: 100, fatRatio: 0.2 }, { calories: 2000, protein: NaN, fatRatio: 0.2 }, { calories: 2000, protein: -1, fatRatio: 0.2 }, { calories: 2000, protein: 100, fatRatio: -0.1 }, { calories: 2000, protein: 100, fatRatio: 1.1 }]) {
+    calculator.setStrategy({ calculate: () => result });
+    assert.throws(() => calculator.calculate(TARGET_CASES[0].profile), TypeError);
+  }
+});
+test('custom strategies inherit the shared calorie and carbohydrate limits', () => {
+  const calculator = new CalorieCalculator({ calculate: () => ({ calories: -500, protein: 100, fatRatio: 0.3 }) });
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 1200, carb: 110, protein: 100, fat: 40 });
+  calculator.setStrategy({ calculate: () => ({ calories: 9000, protein: 100, fatRatio: 0.2 }) });
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 4500, carb: 800, protein: 100, fat: 100 });
+  calculator.setStrategy({ calculate: () => ({ calories: 1200, protein: 400, fatRatio: 0.25 }) });
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 1200, carb: 0, protein: 400, fat: 33 });
+});
+test('browser UMD scripts load in the actual HTML order and match CommonJS results', () => {
+  const root = path.resolve(__dirname, '..');
+  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const scripts = [...html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/g)].map(match => match[1]);
+  const appIndex = scripts.indexOf('app.js');
+  assert.ok(appIndex > 0, 'the app must follow its UMD dependencies');
+  const browser = vm.createContext({});
+  for (const src of scripts.slice(0, appIndex)) {
+    vm.runInContext(fs.readFileSync(path.join(root, src), 'utf8'), browser, { filename: src });
+  }
+  assert.equal(typeof browser.NutriFitTargets.CalorieCalculator, 'function');
+  assert.equal(typeof browser.NutriFitCore.calcTargets, 'function');
+  for (const { profile, expected } of TARGET_CASES) {
+    const actual = JSON.parse(JSON.stringify(browser.NutriFitCore.calcTargets(profile)));
+    assert.deepEqual(actual, expected);
+  }
 });
 test('absent storage stays absent until explicit initialization', () => {
   const { store, storage } = fixture(null);
