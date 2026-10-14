@@ -17,9 +17,10 @@ const TARGET_CASES = [
   ['female', 30, 165, 60, 1.375, 'diet', { calories: 1315, carb: 139, protein: 108, fat: 37 }],
   ['female', 30, 165, 60, 1.375, 'bulk', { calories: 2215, carb: 323, protein: 120, fat: 49 }],
   ['female', 100, 100, 30, 1.2, 'diet', { calories: 1200, carb: 171, protein: 54, fat: 33 }],
-  ['male', 18, 250, 300, 1.9, 'bulk', { calories: 4500, carb: 300, protein: 600, fat: 100 }],
-  ['female', 100, 100, 150, 1.2, 'diet', { calories: 1257, carb: 0, protein: 270, fat: 35 }]
+  ['male', 18, 250, 300, 1.9, 'bulk', { calories: 4500, carb: 300, protein: 600, fat: 100 }]
 ].map(([gender, age, height, weight, activity, goal, expected]) => ({ profile: { gender, age, height, weight, activity, goal }, expected }));
+const INCONSISTENT_PROFILE = { gender: 'female', age: 100, height: 100, weight: 150, activity: 1.2, goal: 'diet' };
+const LEGACY_TARGET = { calories: 1257, carb: 0, protein: 270, fat: 35 };
 function memoryStorage() {
   const data = new Map();
   return { getItem: key => data.has(key) ? data.get(key) : null, setItem: (key, value) => data.set(key, value), data };
@@ -38,7 +39,7 @@ test('local calendar date respects Korean midnight and dates shift over leap day
   assert.equal(core.shiftDate('2026-01-01', -1), '2025-12-31');
   assert.throws(() => core.shiftDate('2026-02-30', 1), code('VALIDATION'));
 });
-test('targets preserve nine pre-refactor results including both sexes and nutrition bounds', () => {
+test('targets preserve eight consistent pre-refactor results including both sexes and bounds', () => {
   for (const { profile, expected } of TARGET_CASES) {
     assert.deepEqual(core.calcTargets(profile), expected, JSON.stringify(profile));
     const formInput = Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, String(value)]));
@@ -46,6 +47,75 @@ test('targets preserve nine pre-refactor results including both sexes and nutrit
   }
   const profile = core.createBlankState(FIXED).profile;
   for (const weight of ['', null, NaN, Infinity, -1, 301]) assert.throws(() => core.calcTargets({ ...profile, weight }), code('VALIDATION'));
+});
+test('inconsistent targets are rejected before rounding can hide their negative allocation', () => {
+  for (const profile of [INCONSISTENT_PROFILE, { ...INCONSISTENT_PROFILE, gender: 'male', weight: 140 }, { ...INCONSISTENT_PROFILE, age: 90, weight: 200 }]) {
+    assert.throws(() => core.calcTargets(profile), code('INCONSISTENT_TARGETS'));
+  }
+  assert.equal(LEGACY_TARGET.protein * 4 + LEGACY_TARGET.fat * 9, 1395);
+});
+test('allocation checks tolerate floating-point noise but reject a real negative remainder', () => {
+  const calculator = new CalorieCalculator({ calculate: () => ({ calories: 1200, protein: 225, fatRatio: 0.25 }) });
+  const expected = { calories: 1200, carb: 0, protein: 225, fat: 33 };
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), expected);
+  calculator.setStrategy({ calculate: () => ({ calories: 1200, protein: 225 + 1e-8, fatRatio: 0.25 }) });
+  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), expected);
+  calculator.setStrategy({ calculate: () => ({ calories: 1200, protein: 225 + 1e-6, fatRatio: 0.25 }) });
+  assert.throws(() => calculator.calculate(TARGET_CASES[0].profile), code('INCONSISTENT_TARGETS'));
+});
+test('a rejected target update preserves the entire saved profile and goal history', () => {
+  const { store, storage } = fixture('sample'), before = storage.getItem('test'), state = store.getState();
+  assert.throws(() => store.updateProfile(INCONSISTENT_PROFILE), code('INCONSISTENT_TARGETS'));
+  assert.equal(storage.getItem('test'), before);
+  assert.deepEqual(store.getState().profile, state.profile);
+  assert.deepEqual(store.getState().goalHistory, state.goalHistory);
+});
+test('legacy inconsistent profiles and historical targets remain readable and are not recalculated', () => {
+  const legacy = core.createBlankState(new Date(2026, 9, 10, 12));
+  legacy.profile = { ...INCONSISTENT_PROFILE };
+  legacy.goalHistory[0] = { date: '2026-10-10', goal: 'diet', targets: { ...LEGACY_TARGET } };
+  const storage = memoryStorage(), serialized = JSON.stringify(legacy);
+  storage.setItem('legacy', serialized);
+  const store = core.createStore(storage, 'legacy', () => FIXED);
+  assert.deepEqual(core.validateState(legacy), legacy);
+  assert.deepEqual(store.load(), legacy);
+  assert.deepEqual(store.summary('2026-10-10').target, LEGACY_TARGET);
+  assert.equal(typeof store.summary('2026-10-10').targetWarning, 'string');
+  assert.equal(storage.getItem('legacy'), serialized);
+  assert.throws(() => store.updateProfile({}), code('INCONSISTENT_TARGETS'));
+  assert.equal(storage.getItem('legacy'), serialized);
+  store.updateProfile(TARGET_CASES[0].profile);
+  assert.deepEqual(store.summary('2026-10-10').target, LEGACY_TARGET);
+  assert.equal(typeof store.summary('2026-10-10').targetWarning, 'string');
+  assert.equal(store.summary('2026-10-11').targetWarning, null);
+  assert.equal(store.getState().version, 1);
+});
+test('stored target warnings distinguish large inconsistencies from integer rounding', () => {
+  const target = { calories: 2000, carb: 310, protein: 100, fat: 40 };
+  assert.equal(core.targetIssue(target), null);
+  assert.equal(core.targetIssue({ ...target, calories: 1991 }), null);
+  assert.equal(core.targetIssue({ ...target, calories: 2009 }), null);
+  assert.equal(typeof core.targetIssue({ ...target, calories: 1990 }), 'string');
+  assert.equal(typeof core.targetIssue({ ...target, calories: 2010 }), 'string');
+  assert.equal(typeof core.targetIssue(LEGACY_TARGET), 'string');
+  assert.deepEqual(target, { calories: 2000, carb: 310, protein: 100, fat: 40 });
+});
+test('a bounded input grid returns arithmetically consistent targets or an explicit rejection', t => {
+  let accepted = 0, rejected = 0;
+  for (const gender of ['male', 'female']) for (const age of [18, 60, 90, 100])
+    for (const height of [100, 120, 175, 250]) for (const weight of [30, 70, 125, 130, 140, 145, 150, 200, 300])
+      for (const activity of [1.2, 1.375, 1.55, 1.725, 1.9]) for (const goal of ['maintain', 'diet', 'bulk']) {
+        let target;
+        try { target = core.calcTargets({ gender, age, height, weight, activity, goal }); }
+        catch (error) { assert.equal(error.code, 'INCONSISTENT_TARGETS'); rejected++; continue; }
+        const energy = target.carb * 4 + target.protein * 4 + target.fat * 9;
+        assert.ok(Math.abs(energy - target.calories) <= 9);
+        assert.equal(core.targetIssue(target), null);
+        accepted++;
+      }
+  assert.ok(accepted > 0 && rejected > 0);
+  assert.equal(accepted + rejected, 4320);
+  t.diagnostic(`${accepted} consistent targets; ${rejected} explicit rejections in a 4320-case grid`);
 });
 test('unsupported goals remain validation errors and do not change saved state', () => {
   const { store, storage } = fixture(), before = storage.getItem('test');
@@ -80,13 +150,13 @@ test('invalid strategies and policy results fail explicitly', () => {
     assert.throws(() => calculator.calculate(TARGET_CASES[0].profile), TypeError);
   }
 });
-test('custom strategies inherit the shared calorie and carbohydrate limits', () => {
+test('custom strategies inherit shared calorie bounds and inconsistent-allocation rejection', () => {
   const calculator = new CalorieCalculator({ calculate: () => ({ calories: -500, protein: 100, fatRatio: 0.3 }) });
   assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 1200, carb: 110, protein: 100, fat: 40 });
   calculator.setStrategy({ calculate: () => ({ calories: 9000, protein: 100, fatRatio: 0.2 }) });
   assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 4500, carb: 800, protein: 100, fat: 100 });
   calculator.setStrategy({ calculate: () => ({ calories: 1200, protein: 400, fatRatio: 0.25 }) });
-  assert.deepEqual(calculator.calculate(TARGET_CASES[0].profile), { calories: 1200, carb: 0, protein: 400, fat: 33 });
+  assert.throws(() => calculator.calculate(TARGET_CASES[0].profile), code('INCONSISTENT_TARGETS'));
 });
 test('browser UMD scripts load in the actual HTML order and match CommonJS results', () => {
   const root = path.resolve(__dirname, '..');
@@ -104,6 +174,8 @@ test('browser UMD scripts load in the actual HTML order and match CommonJS resul
     const actual = JSON.parse(JSON.stringify(browser.NutriFitCore.calcTargets(profile)));
     assert.deepEqual(actual, expected);
   }
+  assert.throws(() => browser.NutriFitCore.calcTargets(INCONSISTENT_PROFILE), code('INCONSISTENT_TARGETS'));
+  assert.equal(typeof browser.NutriFitCore.targetIssue(LEGACY_TARGET), 'string');
 });
 test('absent storage stays absent until explicit initialization', () => {
   const { store, storage } = fixture(null);

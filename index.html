@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="style.css">
   <script src="lib/target-strategies.js" defer></script>
   <script src="lib/core.js" defer></script>
+  <script src="lib/profiles.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -19,6 +20,7 @@
     <nav id="navigation" aria-label="주 메뉴"></nav>
     <span class="demo-badge">PORTFOLIO DEMO</span>
   </div></header>
+  <div id="profile-switcher" class="profile-switcher" hidden></div>
   <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
   <main id="main" tabindex="-1"></main>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message"><form method="dialog"><h2 id="confirm-title">변경 사항 확인</h2><p id="confirm-message"></p><div class="actions"><button value="cancel" autofocus>취소</button><button class="primary" value="confirm">확인</button></div></form></dialog>
